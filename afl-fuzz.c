@@ -341,7 +341,11 @@ int createSocket()
   memset(&mysockaddr, 0x00, sizeof(mysockaddr));
   mysockaddr.sin_family = AF_INET;
   mysockaddr.sin_port = htons(PORT);
+<<<<<<< HEAD
   mysockaddr.sin_addr.s_addr = inet_addr("192.168.1.234");
+=======
+  mysockaddr.sin_addr.s_addr = inet_addr("192.168.1.34");
+>>>>>>> 71cb43f8222b623b980a496f1a270ff88b083b52
 
   if (-1 == connect(csocfd, (struct sockaddr *)&mysockaddr, sizeof(mysockaddr)))
   {

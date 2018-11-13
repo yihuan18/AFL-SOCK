@@ -31,6 +31,7 @@
 #include "debug.h"
 #include "alloc-inl.h"
 #include "hash.h"
+#include "communicate.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -79,6 +80,12 @@
 /* Lots of globals, but mostly for the status UI and other things where it
    really makes no sense to haul them around as function parameters. */
 
+//yihuan add mutation counter
+u32 mutation_counter = 0;   //用于记录总共变异的次数
+u32 filtered_counter = 0;        //用于记录经过tensorflow过滤后的mutaion_counter
+u32 useful_counter = 0;     //用于记录发现有效case的次数
+
+char seed_dir[256];
 
 EXP_ST u8 *in_dir,                    /* Input directory with test cases  */
           *out_file,                  /* File to fuzz, if any             */
@@ -320,6 +327,40 @@ enum {
   /* 04 */ FAULT_NOINST,
   /* 05 */ FAULT_NOBITS
 };
+
+//yihuan add 创建套接字
+int createSocket()
+{
+  if (-1 == (csocfd = socket(AF_INET, SOCK_STREAM, 0)))
+    {
+        printf("csocfd failed!\n");
+        return -1;
+    }
+    printf("csocfd suc!\n");
+  
+  memset(&mysockaddr, 0x00, sizeof(mysockaddr));
+  mysockaddr.sin_family = AF_INET;
+  mysockaddr.sin_port = htons(PORT);
+  mysockaddr.sin_addr.s_addr = inet_addr("192.168.1.34");
+
+  if (-1 == connect(csocfd, (struct sockaddr *)&mysockaddr, sizeof(mysockaddr)))
+  {
+      printf("connect failed!\n");
+      return -1;
+  }
+  printf("connect suc!\n");
+  //设置为阻塞模式
+  int iGetFL = fcntl(csocfd, F_GETFL);
+    if (-1 == iGetFL)
+    {
+        return -1;
+    }
+    
+    if (-1 == fcntl(csocfd, F_SETFL, iGetFL & (~O_NONBLOCK)))
+    {
+        return -1;
+    }
+}
 
 
 /* Get unix time in milliseconds */
@@ -3117,9 +3158,27 @@ static void write_crash_readme(void) {
 static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
   u8  *fn = "";
+  //yihuan add my_fn
+  u8  *my_fn = "";
   u8  hnb;
+  //yihuan add my_fd
+  s32 my_fd;
   s32 fd;
   u8  keeping = 0, res;
+  //yihuan add
+  u8 written = 0;
+
+  u8 *mutation_buf;
+  mutation_buf = ck_alloc(queue_cur->len);
+  //printf("[socket debug] queue_cur->len is %d\n",queue_cur->len);
+  int i = 0;
+  for(;i < queue_cur->len ; i++)
+  {
+    //mutation_buf[i] = seed_buf[i] & out_buf[i];
+    if(seed_buf[i] == ((u8 *)mem)[i])
+      mutation_buf[i] = '0';
+    else  mutation_buf[i] = '1';
+  }
 
   if (fault == crash_mode) {
 
@@ -3127,7 +3186,28 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
        future fuzzing, etc. */
 
     if (!(hnb = has_new_bits(virgin_bits))) {
-      if (crash_mode) total_crashes++;
+      if (crash_mode) 
+      {
+        //yihuan add write to useless file
+        my_fn = alloc_printf("%s/useful/id:%06u", seed_dir , mutation_counter);
+        my_fd = open(my_fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (my_fd < 0) PFATAL("Unable to create '%s'", my_fn);
+        ck_write(my_fd, mutation_buf, queue_cur->len, my_fn);
+        close(my_fd);
+        ck_free(my_fn);
+        total_crashes++;
+        useful_counter += 1;
+      }
+      else
+      {
+        //yihuan add write to useless file
+        my_fn = alloc_printf("%s/useless/id:%06u", seed_dir , mutation_counter);
+        my_fd = open(my_fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (my_fd < 0) PFATAL("Unable to create '%s'", my_fn);
+        ck_write(my_fd, mutation_buf, queue_cur->len, my_fn);
+        close(my_fd);
+        ck_free(my_fn);
+      }
       return 0;
     }    
 
@@ -3147,6 +3227,14 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     if (hnb == 2) {
       queue_top->has_new_cov = 1;
       queued_with_cov++;
+      my_fn = alloc_printf("%s/useful/id:%06u", seed_dir , mutation_counter);
+      my_fd = open(my_fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
+      if (my_fd < 0) PFATAL("Unable to create '%s'", my_fn);
+      ck_write(my_fd, mutation_buf, queue_cur->len, my_fn);
+      close(my_fd);
+      ck_free(my_fn);
+      useful_counter += 1;
+      written = 1;
     }
 
     queue_top->exec_cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST);
@@ -3179,7 +3267,24 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
       total_tmouts++;
 
-      if (unique_hangs >= KEEP_UNIQUE_HANG) return keeping;
+      //yihuan add write to useful file
+      if(written == 0)
+      {
+        my_fn = alloc_printf("%s/useful/id:%06u", seed_dir , mutation_counter);
+        my_fd = open(my_fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (my_fd < 0) PFATAL("Unable to create '%s'", my_fn);
+        ck_write(my_fd, mutation_buf, queue_cur->len, my_fn);
+        close(my_fd);
+        ck_free(my_fn);
+        useful_counter += 1;
+      }
+      
+
+      if (unique_hangs >= KEEP_UNIQUE_HANG) 
+      {
+          return keeping;
+      }
+      
 
       if (!dumb_mode) {
 
@@ -3189,7 +3294,11 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
         simplify_trace((u32*)trace_bits);
 #endif /* ^__x86_64__ */
 
-        if (!has_new_bits(virgin_tmout)) return keeping;
+        if (!has_new_bits(virgin_tmout)) 
+        {
+          
+          return keeping;
+        }
 
       }
 
@@ -3211,7 +3320,10 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
         if (!stop_soon && new_fault == FAULT_CRASH) goto keep_as_crash;
 
-        if (stop_soon || new_fault != FAULT_TMOUT) return keeping;
+        if (stop_soon || new_fault != FAULT_TMOUT) 
+        {
+          return keeping;
+        }
 
       }
 
@@ -3231,9 +3343,21 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
       last_hang_time = get_cur_time();
 
-      break;
-
+      break;  //end case fault timeout
+//start case fault_crash
     case FAULT_CRASH:
+
+      //yihuan add write to useful file
+      if(written == 0)
+      {
+        my_fn = alloc_printf("%s/useful/id:%06u", seed_dir , mutation_counter);
+        my_fd = open(my_fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (my_fd < 0) PFATAL("Unable to create '%s'", my_fn);
+        ck_write(my_fd, mutation_buf, queue_cur->len, my_fn);
+        close(my_fd);
+        ck_free(my_fn);
+        useful_counter += 1;
+      }
 
 keep_as_crash:
 
@@ -3243,7 +3367,10 @@ keep_as_crash:
 
       total_crashes++;
 
-      if (unique_crashes >= KEEP_UNIQUE_CRASH) return keeping;
+      if (unique_crashes >= KEEP_UNIQUE_CRASH) 
+      {
+        return keeping;
+      }
 
       if (!dumb_mode) {
 
@@ -3253,7 +3380,10 @@ keep_as_crash:
         simplify_trace((u32*)trace_bits);
 #endif /* ^__x86_64__ */
 
-        if (!has_new_bits(virgin_crash)) return keeping;
+        if (!has_new_bits(virgin_crash)) 
+        {
+          return keeping;
+        }
 
       }
 
@@ -3278,14 +3408,33 @@ keep_as_crash:
 
       break;
 
-    case FAULT_ERROR: FATAL("Unable to execute target application");
+    case FAULT_ERROR: 
+      //yihuan add write to useless file
+      //printf("[FAULT_ERROR]write to useless file\n");
+      my_fn = alloc_printf("%s/useless/id:%06u", seed_dir , mutation_counter);
+      my_fd = open(my_fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
+      if (my_fd < 0) PFATAL("Unable to create '%s'", my_fn);
+      ck_write(my_fd, mutation_buf, queue_cur->len, my_fn);
+      close(my_fd);
+      FATAL("Unable to execute target application");
 
-    default: return keeping;
+    default: 
+    //yihuan add write to useless file
+      //printf("[DEFAULT]write to useless file\n");
+      my_fn = alloc_printf("%s/useless/id:%06u", seed_dir , mutation_counter);
+      my_fd = open(my_fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
+      if (my_fd < 0) PFATAL("Unable to create '%s'", my_fn);
+      ck_write(my_fd, mutation_buf, queue_cur->len, my_fn);
+      close(my_fd);
+      ck_free(my_fn);
+      return keeping;
 
   }
 
   /* If we're here, we apparently want to save the crash or hang
      test case, too. */
+
+
 
   fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
   if (fd < 0) PFATAL("Unable to create '%s'", fn);
@@ -4331,6 +4480,11 @@ static void show_stats(void) {
 
   /* Hallelujah! */
 
+//yihuan add 
+  printf("Total mutation number :    %d\n",mutation_counter);
+  printf("Filtered mutation number : %d\n",filtered_counter);
+  printf("Useful mutation number :   %d\n",useful_counter);
+
   fflush(0);
 
 }
@@ -4588,6 +4742,17 @@ EXP_ST u8 common_fuzz_stuff(char** argv, u8* out_buf, u32 len) {
 
   u8 fault;
 
+  //yihuan add
+  mutation_counter += 1;
+  //printf("yihuan enter mutation_counter = %d\n",mutation_counter);
+  
+  if(mutation_counter % 100 == 0)
+  {
+    fprintf(yihuan_fd,"total mutation : %d\n", mutation_counter);
+    fprintf(yihuan_fd,"run mutation : %d\n", filtered_counter);
+    fprintf(yihuan_fd,"useful mutation : %d\n", useful_counter);
+  }
+
   if (post_handler) {
 
     out_buf = post_handler(out_buf, &len);
@@ -4595,10 +4760,62 @@ EXP_ST u8 common_fuzz_stuff(char** argv, u8* out_buf, u32 len) {
 
   }
 
+  //yihuan add before running , send to ai
+  u64 start_time = get_cur_time();
+  u8 *mutation_buf;
+  mutation_buf = ck_alloc(queue_cur->len);
+  //printf("[socket debug] queue_cur->len is %d\n",queue_cur->len);
+  int i = 0;
+  for(;i < queue_cur->len ; i++)
+  {
+    //mutation_buf[i] = seed_buf[i] & out_buf[i];
+    if(seed_buf[i] == out_buf[i])
+      mutation_buf[i] = '0';
+    else  mutation_buf[i] = '1';
+  }
+/*
+  for(i = 0; i < 100 ; i++)
+  {
+    printf("%c ",mutation_buf[i]);
+  }
+*/
+  //yihuan todo send the mutation buf to ai module
+  if (-1 == send(csocfd, mutation_buf, queue_cur->len , 0))
+  {
+    printf("send failed\n");
+    return -1;
+  }
+  //printf("send suc!\n");
+  //recv from ai 
+  int ret;
+  char if_useful;
+  if (-1 == (ret = recv(csocfd, &if_useful, 1 , 0)))
+  {
+    printf("read failed!\n");
+    return -1;
+  }
+
+  u64 end_time = get_cur_time();
+  //printf("Time needed from send to recv : %d\n" , end_time - start_time);
+  //printf("read suc!\n");
+  //printf("[sock_debug] is_useful = %c\n",if_useful);
+  //sleep(1);
+  //judge if need to run , if not return 0
+  if(if_useful == '0')
+  {
+    //printf("useless mutation , do not run\n");
+    goto yihuan_here;
+  }
+
+  //yihuan add counter
+  filtered_counter += 1; 
+  
+  ck_free(mutation_buf);
+
   write_to_testcase(out_buf, len);
 
   fault = run_target(argv, exec_tmout);
-
+  //printf("[common_fuzz_stuff] run_target fault : %d\0",fault);
   if (stop_soon) return 1;
 
   if (fault == FAULT_TMOUT) {
@@ -4622,9 +4839,9 @@ EXP_ST u8 common_fuzz_stuff(char** argv, u8* out_buf, u32 len) {
   }
 
   /* This handles FAULT_ERROR for us: */
-
+  //printf("[common_fuzz_stuff] ready save if interesting\n");
   queued_discovered += save_if_interesting(argv, out_buf, len, fault);
-
+yihuan_here:
   if (!(stage_cur % stats_update_freq) || stage_cur + 1 == stage_max)
     show_stats();
 
@@ -4940,6 +5157,7 @@ static u8 could_be_interest(u32 old_val, u32 new_val, u8 blen, u8 check_le) {
 static u8 fuzz_one(char** argv) {
 
   s32 len, fd, temp_len, i, j;
+  u8 * tmp;
   u8  *in_buf, *out_buf, *orig_in, *ex_tmp, *eff_map = 0;
   u64 havoc_queued,  orig_hit_cnt, new_hit_cnt;
   u32 splice_cycle = 0, perf_score = 100, orig_perf, prev_cksum, eff_cnt = 1;
@@ -4948,6 +5166,9 @@ static u8 fuzz_one(char** argv) {
 
   u8  a_collect[MAX_AUTO_EXTRA];
   u32 a_len = 0;
+
+  //yihuan add
+  //mutation_counter = 0;
 
 #ifdef IGNORE_FINDS
 
@@ -5000,12 +5221,49 @@ static u8 fuzz_one(char** argv) {
   if (fd < 0) PFATAL("Unable to open '%s'", queue_cur->fname);
 
   len = queue_cur->len;
-
-  orig_in = in_buf = mmap(0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+  
+  //将文件内容映射到内存，返回内存地址
+  seed_buf = orig_in = in_buf = mmap(0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
 
   if (orig_in == MAP_FAILED) PFATAL("Unable to mmap '%s'", queue_cur->fname);
 
   close(fd);
+
+  //yihuan add get name
+  u8* rsl = strrchr(queue_cur->fname, '/');
+  if (!rsl) rsl = queue_cur->fname; else rsl++;
+  memset(seed_dir,0,sizeof(seed_dir));
+  strcat(seed_dir,out_dir);
+  strcat(seed_dir,"/");
+  strcat(seed_dir,rsl);
+  //printf("%s",seed_dir);
+  //yihuan add 创建种子文件目录
+  tmp = alloc_printf("%s/%s", out_dir , rsl);
+  mkdir(tmp, 0700);
+  ck_free(tmp);
+  //if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);
+  tmp = alloc_printf("%s/%s/useful", out_dir , rsl);
+  mkdir(tmp, 0700);
+  ck_free(tmp);
+  //if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);
+  tmp = alloc_printf("%s/%s/useless", out_dir , rsl);
+  mkdir(tmp, 0700);
+  ck_free(tmp);
+  //if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);
+
+  //yihuan add 将种子文件放入目录
+  tmp = alloc_printf("%s/%s/seed_file", out_dir , rsl);
+  fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL, 0600);
+  if (fd < 0)
+  {
+    //printf("Unable to create '%s'", tmp);
+  } 
+  else{
+    ck_write(fd, in_buf, len, tmp);
+    close(fd);
+  }
+  ck_free(tmp);
+  
 
   /* We could mmap() out_buf as MAP_PRIVATE, but we end up clobbering every
      single byte anyway, so it wouldn't give us any performance or memory usage
@@ -5115,7 +5373,7 @@ static u8 fuzz_one(char** argv) {
     stage_cur_byte = stage_cur >> 3;
 
     FLIP_BIT(out_buf, stage_cur);
-
+    //printf("[bit flip] doing bit flip stage 1\n");
     if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
 
     FLIP_BIT(out_buf, stage_cur);
@@ -5208,7 +5466,7 @@ static u8 fuzz_one(char** argv) {
 
     FLIP_BIT(out_buf, stage_cur);
     FLIP_BIT(out_buf, stage_cur + 1);
-
+    //printf("[bit_flip]doing bit flip stage 2\n");
     if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
 
     FLIP_BIT(out_buf, stage_cur);
@@ -5597,7 +5855,7 @@ skip_bitflip:
   for (i = 0; i < len - 3; i++) {
 
     u32 orig = *(u32*)(out_buf + i);
-
+    //printf("[ARITH] doing arith mutation stage 32/8\n");
     /* Let's consult the effector map... */
 
     if (!eff_map[EFF_APOS(i)] && !eff_map[EFF_APOS(i + 1)] &&
@@ -7979,7 +8237,7 @@ int main(int argc, char** argv) {
     use_argv = argv + optind;
 
   perform_dry_run(use_argv);
-
+  SAYF("yihuan here!");
   cull_queue();
 
   show_init_stats();
@@ -7999,6 +8257,10 @@ int main(int argc, char** argv) {
     if (stop_soon) goto stop_fuzzing;
   }
 
+
+  //yihuan add start socket
+  createSocket();
+  yihuan_fd = fopen("./fuzz_status","w");
   while (1) {
 
     u8 skipped_fuzz;
@@ -8038,7 +8300,7 @@ int main(int argc, char** argv) {
 
       if (sync_id && queue_cycle == 1 && getenv("AFL_IMPORT_FIRST"))
         sync_fuzzers(use_argv);
-
+  
     }
 
     skipped_fuzz = fuzz_one(use_argv);
@@ -8066,7 +8328,11 @@ int main(int argc, char** argv) {
   save_auto();
 
 stop_fuzzing:
-
+  //yihuan add
+  fprintf(yihuan_fd,"total mutation : %d\n", mutation_counter);
+  fprintf(yihuan_fd,"run mutation : %d\n", filtered_counter);
+  fprintf(yihuan_fd,"useful mutation : %d\n", useful_counter);
+  fclose(yihuan_fd);
   SAYF(CURSOR_SHOW cLRD "\n\n+++ Testing aborted %s +++\n" cRST,
        stop_soon == 2 ? "programmatically" : "by user");
 
@@ -8090,6 +8356,11 @@ stop_fuzzing:
 
   OKF("We're done here. Have a nice day!\n");
 
+  printf("Total mutation number :    %d\n",mutation_counter);
+  printf("Filtered mutation number : %d\n",filtered_counter);
+  printf("Useful mutation number :   %d\n",useful_counter);
+  //yihuan add close socket
+  close(csocfd);
   exit(0);
 
 }
